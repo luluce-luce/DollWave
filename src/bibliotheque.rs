@@ -36,8 +36,8 @@ struct Dossier {
 
 impl Dossier {
     /// Parcourt un dossier et ses sous-dossiers. Les dossiers illisibles
-    /// sont simplement ignorés. Tout est trié par nom, sans tenir compte
-    /// des majuscules.
+    /// sont simplement ignorés. Les sous-dossiers sont triés par nom, sans
+    /// tenir compte des majuscules ; les morceaux, par numéro de piste.
     fn lire(chemin: &Path) -> Dossier {
         let mut dossier = Dossier {
             chemin: chemin.to_path_buf(),
@@ -63,13 +63,22 @@ impl Dossier {
                 }
             }
         }
-        // « cached » : chaque nom n'est mis en minuscules qu'une fois.
+        // « cached » : chaque nom n'est mis en minuscules (et chaque fichier
+        // lu) qu'une fois.
         dossier
             .sous_dossiers
             .sort_by_cached_key(|d| d.nom.to_lowercase());
-        dossier
-            .morceaux
-            .sort_by_cached_key(|m| nom_du_fichier(m).to_lowercase());
+        // Les morceaux : par disque puis par piste, d'après leurs tags ; ceux
+        // sans numéro de piste à la fin, et à égalité, par nom de fichier.
+        dossier.morceaux.sort_by_cached_key(|m| {
+            let tags = crate::tags::lire(m);
+            (
+                tags.numero.is_none(),
+                tags.disque.unwrap_or(1),
+                tags.numero,
+                nom_du_fichier(m).to_lowercase(),
+            )
+        });
         dossier.total =
             dossier.morceaux.len() + dossier.sous_dossiers.iter().map(|d| d.total).sum::<usize>();
         dossier
@@ -1512,6 +1521,45 @@ mod tests {
         let dossiers: Vec<_> = contenu.tous.iter().map(|e| e.dossier.as_str()).collect();
         let album = Path::new("Zebda").join("Album").display().to_string();
         assert_eq!(dossiers, ["abba", "abba", album.as_str(), "", ""]);
+
+        std::fs::remove_dir_all(&racine).unwrap();
+    }
+
+    /// Dans un dossier, les morceaux suivent le disque puis la piste (tags) ;
+    /// ceux sans numéro viennent après, par nom de fichier.
+    #[test]
+    fn les_morceaux_d_un_dossier_suivent_les_numeros_de_piste() {
+        use crate::tags::tests::ecrire_mp3_avec;
+        let racine = dossier_de_test("numeros_de_piste");
+        for (nom, cadres) in [
+            ("a.mp3", vec![("TRCK", "3/4")]),
+            ("b.mp3", vec![("TRCK", "1"), ("TPOS", "2")]),
+            ("c.mp3", vec![("TRCK", "10")]),
+            ("d.mp3", vec![("TRCK", "2")]),
+            ("Z sans numéro.mp3", vec![]),
+            ("e sans numéro.mp3", vec![("TIT2", "Rien")]),
+        ] {
+            let fichier = ecrire_mp3_avec(&format!("piste_{nom}"), &cadres, false, 1);
+            std::fs::rename(fichier, racine.join(nom)).unwrap();
+        }
+
+        let contenu = Contenu::lire(&racine);
+        assert_eq!(
+            noms(&contenu.racine.morceaux),
+            [
+                "d.mp3",
+                "a.mp3",
+                "c.mp3",
+                "b.mp3",
+                "e sans numéro.mp3",
+                "Z sans numéro.mp3"
+            ]
+        );
+        // Le glisser-déposer d'un dossier suit le même ordre.
+        assert_eq!(
+            noms(&morceaux_du_dossier(&racine)),
+            noms(&contenu.racine.morceaux)
+        );
 
         std::fs::remove_dir_all(&racine).unwrap();
     }
